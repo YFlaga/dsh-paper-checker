@@ -1,0 +1,13 @@
+# @dsh-external/dsh-paper-checker bundle patch
+#
+# 这是 `dsh.bundle.patch` 指向的挂载层。当插件通过标准渠道安装
+# （官方 CLI `dsh plugin add` 或插件市场 `pnpm add` + bundles 写入）后，
+# profile boot 会合并本 patch，把这个 insert 条目装配进插件栈——
+# 等价于手工在 profile cordis.patch.yml 里写挂载行。
+#
+# config（期刊列表/时间/SendKey 等）不写在这里，由用户安装后在
+# 插件设置面板「投稿检查」里配置，持久化到 settings.yaml 的
+# paper-checker 命名空间。
+- insert:
+    - id: paper-checker
+      name: '@dsh-external/dsh-paper-checker'

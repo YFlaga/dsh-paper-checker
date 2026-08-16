@@ -1,0 +1,42 @@
+{
+  "name": "@dsh-external/dsh-paper-checker",
+  "version": "0.0.1",
+  "description": "检查学术期刊投稿审稿状态并定时汇报：Editorial Manager 期刊走确定性 Playwright 抓取，其他投稿系统回退给 AI 用浏览器工具处理。",
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml"
+  ],
+  "license": "BSD-3-Clause",
+  "dependencies": {
+    "playwright-core": "^1.55.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsdown": "^0.22.14",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build:client": "tsdown"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "platform": "web"
+    }
+  }
+}
