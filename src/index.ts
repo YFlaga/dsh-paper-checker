@@ -92,21 +92,66 @@ interface JournalResult {
 
 // ============ 状态翻译 ============
 const STATUS_ZH: Record<string, string> = {
+  // 审稿流程（submission）
   'Under Review': '审稿中',
-  'In Production': '生产中',
-  'Needs Author Action': '等待作者操作',
   'With Editor': '编辑处理中',
+  'With Editorial Office': '编辑部处理中',
   'Required Reviews Completed': '审稿完成',
   'Decision in Process': '决策中',
+  'Reviewers Assigned': '已指派审稿人',
+  'Reviewers Invited': '已邀请审稿人',
+  'Awaiting Reviewer Selection': '等待选择审稿人',
+  'Awaiting Reviewer Scores': '等待审稿意见',
+  'Awaiting EIC Assignment': '等待主编指派',
+  'Submitted': '已投稿',
+  'Submission': '已投稿',
+  'Transfer': '已转投',
+  'Transferred': '已转投',
+  'Withdrawn': '已撤稿',
+  'Declined': '已婉拒',
+  'Sent Back to Author': '退回作者',
+  'Incomplete': '信息不完整',
+  'Waiting for Approval': '等待批准',
+  'Awaiting Author Approval': '等待作者确认',
+  'Submissions Being Processed': '处理中',
+  // 修改流程（revision）
   'Submissions Needing Revision': '需要修改',
   'Major Revision': '大修',
   'Minor Revision': '小修',
+  'Revise': '修改中',
+  'Revised': '已修改',
+  'Under Revision': '修改中',
   'Revisions Being Processed': '修改处理中',
+  'Revisions Under Review': '修改稿审稿中',
+  'Incomplete Submissions Being Revised': '修改信息不完整',
+  'Date Revision Began': '修改开始',
+  'Date Revision Due': '修改截止',
+  // 生产流程（production）
+  'In Production': '生产中',
+  'Production': '生产中',
+  'With Production': '生产中',
+  'Proofs Available': '校样可获取',
+  'Proofs Sent': '校样已发送',
+  'Issue Assigned': '已分配刊期',
+  // 结果
   'Completed': '已完成',
   'Accepted': '已接受',
   'Rejected': '已拒稿',
 }
-const zh = (s: string): string => STATUS_ZH[s.trim()] ?? s.trim()
+/** 状态翻译：精确表优先，其次前缀/关键词兜底。 */
+const zh = (s: string): string => {
+  const t = (s || '').trim()
+  if (!t) return ''
+  if (STATUS_ZH[t]) return STATUS_ZH[t]
+  if (/^reject/i.test(t)) return '已拒稿'
+  if (/^accept/i.test(t)) return '已接受'
+  if (/production/i.test(t)) return '生产中'
+  if (/revis/i.test(t)) return '修改中'
+  if (/^under review/i.test(t)) return '审稿中'
+  if (/reviewer/i.test(t)) return '审稿中'
+  if (/^withdraw/i.test(t)) return '已撤稿'
+  return t
+}
 
 // ============ 工具函数 ============
 function defaultReportDir(): string {
@@ -176,15 +221,26 @@ async function scrapeMenu(frame: any): Promise<{ counts: Record<string, number>;
 
 async function parseTable(frame: any): Promise<{ headers: string[]; rows: string[][] } | null> {
   for (let i = 0; i < 40; i++) {
-    const n = await frame.locator('table#datatable').count().catch(() => 0)
-    if (n > 0) {
+    const found = await frame.evaluate(() => {
+      const t = document.querySelector('table#datatable') || document.querySelector('table#GridSubmissions')
+      return !!t || Array.from(document.querySelectorAll('table')).some((tb) => tb.querySelector('th'))
+    }).catch(() => false)
+    if (found) {
       return frame.evaluate(() => {
-        const table = document.querySelector('table#datatable')
+        // 兼容两种 EM 结构：标准 #datatable（thead 表头）/ Grid 表格（表头在 tbody 第一行的 th）
+        const table = document.querySelector('table#datatable') || document.querySelector('table#GridSubmissions')
+          || Array.from(document.querySelectorAll('table')).find((tb) => tb.querySelector('th'))
         if (!table) return null
-        const ths = Array.from(table.querySelectorAll('thead th')).map((th: any) => (th.innerText || '').replace(/\s+/g, ' ').trim() || 'action')
-        const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr: any) =>
-          Array.from(tr.querySelectorAll('td')).map((td: any) => (td.innerText || '').replace(/\s+/g, ' ').trim()),
-        )
+        let ths: string[] = []
+        const theadThs = table.querySelectorAll('thead th')
+        if (theadThs.length > 0) {
+          ths = Array.from(theadThs).map((th: any) => (th.innerText || '').replace(/\s+/g, ' ').trim() || 'action')
+        } else {
+          ths = Array.from(table.querySelectorAll('th')).map((th: any) => (th.innerText || '').replace(/\s+/g, ' ').trim() || 'action')
+        }
+        const rows = Array.from(table.querySelectorAll('tbody tr, tr'))
+          .filter((tr: any) => tr.querySelector('td') && !tr.querySelector('th'))
+          .map((tr: any) => Array.from(tr.querySelectorAll('td')).map((td: any) => (td.innerText || '').replace(/\s+/g, ' ').trim()))
         return { headers: ths, rows }
       }).catch(() => null)
     }
@@ -202,10 +258,10 @@ function normalizeRows(parsed: { headers: string[]; rows: string[][] } | null): 
       number: rec['manuscript number'] ?? '',
       title: rec['title'] ?? rec['article title'] ?? '',
       submitted: rec['initial date submitted'] ?? '',
-      statusDate: rec['status date'] ?? rec['final decision date'] ?? '',
+      statusDate: rec['status date'] ?? rec['final decision date'] ?? rec['transfer offer expiration date'] ?? '',
       revBegan: rec['date revision began'] ?? '',
-      revDue: rec['date revision due'] ?? '',
-      status: rec['current status'] ?? rec['production status'] ?? '',
+      revDue: rec['date revision due'] ?? rec['transfer offer expiration date'] ?? '',
+      status: rec['current status'] ?? rec['production status'] ?? rec['status'] ?? '',
     }
   }).filter((s) => s.number || s.title)
 }
@@ -298,14 +354,30 @@ async function scrapeEmJournal(j: JournalConfig): Promise<JournalResult> {
     if (!frame) return { journal: j.name, system: 'editorial-manager', error: '登录失败或未等到主菜单 [' + dbg.join(' | ') + ']' }
 
     const { counts, links } = await scrapeMenu(frame)
+    // 分区清单：配置的分区优先（保序、尊重用户显式选择），再自动补充主菜单上其他「活跃投稿分区」
+    // （count>0 且有链接；排除 New Submissions 发起入口 / with a Decision 决策历史 / with Production Completed 已完成）
+    const secNames: string[] = []
+    for (const sec of j.sections) if (sec && !secNames.includes(sec)) secNames.push(sec)
+    for (const key of Object.keys(links)) {
+      if (secNames.includes(key)) continue
+      const kt = key.toLowerCase()
+      if (!/(submission|revision)/.test(kt)) continue
+      if (/new submission|with a decision|with production completed/.test(kt)) continue
+      if ((counts[key] ?? 0) > 0 && links[key]) secNames.push(key)
+    }
     const sections: SectionResult[] = []
-    for (const secName of j.sections) {
+    for (const secName of secNames) {
       const count = counts[secName] ?? 0
       const href = links[secName]
       const submissions: Submission[] = []
       if (count > 0 && href) {
         await frame.goto(href, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
-        submissions.push(...normalizeRows(await parseTable(frame)))
+        const rows = normalizeRows(await parseTable(frame))
+        // 转投/等待批准分区的 Current Status 列显示的是操作词（Reject/Decline），修正为「等待作者批准」
+        if (/waiting for author|transfer/i.test(secName)) {
+          for (const s of rows) if (/^reject|^decline/i.test(s.status)) s.status = 'Awaiting Author Approval'
+        }
+        submissions.push(...rows)
       }
       sections.push({ name: secName, count, submissions })
     }
@@ -318,9 +390,20 @@ async function scrapeEmJournal(j: JournalConfig): Promise<JournalResult> {
 }
 
 // ============ 报告与通知 ============
+/** 稿件阶段：production（生产中）/ revision（修改中）/ submission（审稿中）。 */
+type Stage = 'submission' | 'revision' | 'production'
+const STAGE_ZH: Record<Stage, string> = { submission: '审稿', revision: '修改', production: '生产' }
+function stageOf(secName: string, status: string): Stage {
+  const t = (secName + ' ' + status).toLowerCase()
+  if (t.includes('production')) return 'production'
+  if (t.includes('revis')) return 'revision'
+  return 'submission'
+}
+
 function formatReport(results: JournalResult[], dateStr: string): string {
   const lines: string[] = [`📊 每日投稿状态报告 (${dateStr})`, '']
   let total = 0
+  const stageCounts: Record<Stage, number> = { submission: 0, revision: 0, production: 0 }
   for (const r of results) {
     lines.push(`**${r.journal}:**`)
     if (r.error) {
@@ -331,22 +414,36 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       lines.push('- 需 AI 手动检查（非 Editorial Manager，请用浏览器工具或 check_paper_status 交互式处理）')
       continue
     }
-    const subs = (r.sections ?? []).flatMap((s) => s.submissions)
-    total += subs.length
-    if (subs.length === 0) {
-      lines.push('- 无活跃投稿（关注分区计数均为 0）。')
-    } else {
+    const sections = r.sections ?? []
+    if (!sections.some((s) => (s.submissions?.length ?? 0) > 0)) {
+      lines.push('- 无活跃投稿（所有分区计数均为 0）。')
+      lines.push('')
+      continue
+    }
+    for (const sec of sections) {
+      const subs = sec.submissions ?? []
+      if (subs.length === 0) {
+        if ((sec.count ?? 0) > 0) lines.push(`- ⚠️ ${sec.name}（计数 ${sec.count}，未抓到稿件列表）`)
+        continue
+      }
+      lines.push(`- 📂 ${sec.name}（${sec.count}）`)
       for (const s of subs) {
+        const stage = stageOf(sec.name, s.status)
+        stageCounts[stage]++
+        total++
         const parts: string[] = []
         if (s.submitted) parts.push(`投稿 ${s.submitted}`)
         if (s.statusDate) parts.push(`更新 ${s.statusDate}`)
         if (s.revDue) parts.push(`截止 ${s.revDue}`)
-        lines.push(`- [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
+        lines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
       }
     }
     lines.push('')
   }
-  lines.push(`**摘要:** 共 ${total} 篇活跃投稿。`)
+  const stageSummary = (['submission', 'revision', 'production'] as Stage[])
+    .filter((k) => stageCounts[k] > 0)
+    .map((k) => `${STAGE_ZH[k]} ${stageCounts[k]} 篇`)
+  lines.push(`**摘要:** 共 ${total} 篇活跃投稿${stageSummary.length ? '（' + stageSummary.join(' · ') + '）' : ''}。`)
   return lines.join('\n')
 }
 
