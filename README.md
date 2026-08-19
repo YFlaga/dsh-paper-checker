@@ -4,6 +4,7 @@
 
 - **Editorial Manager 期刊**：内置确定性 Playwright 抓取（`channel: msedge`，用系统 Edge，无需下载浏览器）。
 - **自动识别稿件阶段**：主菜单上所有「活跃投稿分区」自动抓取（审稿 submission / 修改 revision / 生产 production），报告按分区分组 + 摘要统计三阶段篇数。
+- **已决策稿件**：自动抓取 `Submissions with a Decision`（含拒绝/接受结果），但只在决策后 7 天内列进报告（避免历史决策刷屏），独立分组「📂 近期决策（7 天内）」。
 - **其他投稿系统**（`system: 'other'`）：返回「回退信号」，由 AI 用浏览器工具交互式处理（方案 C 混合模式）。
 - **守护定时**：每天到点自动检查 → 写报告 → 推微信（Server酱）。
 - **按需工具**：`check_paper_status`，agent 可随时调用。
@@ -103,7 +104,7 @@ discoverModel: ''                 # 可选：自动识别新期刊用的模型�
 ## 输出
 
 - 报告写入 `{reportDir}/report-{date}.md` 和 `latest.md`，运行日志 `run.log`。
-- 报告按分区分组列出每篇稿件（`- 📂 分区名（计数）` → `- [状态] 稿件号: 标题（投稿/更新/截止）`），末尾摘要统计三阶段：`审稿 N 篇 · 修改 N 篇 · 生产 N 篇`。
+- 报告按分区分组列出每篇稿件（`- 📂 分区名（计数）` → `- [状态] 稿件号: 标题（投稿/更新/截止）`），末尾摘要统计三阶段：`审稿 N 篇 · 修改 N 篇 · 生产 N 篇`；若有 7 天内决策的稿件，追加独立分组「📂 近期决策（7 天内）」与摘要 `· 近期决策 N 篇`。
 - 微信推送（若配置了 `serverchanKey`）标题 `📊 投稿状态报告 (日期)`。
 - 工具 `check_paper_status` 返回中文报告文本。
 
@@ -115,9 +116,10 @@ discoverModel: ''                 # 可选：自动识别新期刊用的模型�
 ## 说明
 
 - Editorial Manager 登录兼容两种形态：直接表单 / 折叠在「Alternatively, use your username and password」里。
-- 分区自动发现：抓取主菜单上所有 count>0 的投稿分区（Submissions Being Processed / Needing Revision / in Production / Revisions Being Processed / 转投待批准等），排除 New Submissions 入口与 with a Decision / with Production Completed 历史列表；`sections` 配置只决定「优先顺序」。
+- 分区自动发现：抓取主菜单上所有 count>0 的投稿分区（Submissions Being Processed / Needing Revision / in Production / Revisions Being Processed / 转投待批准等），排除 New Submissions 入口与 with Production Completed 已完成历史；`sections` 配置只决定「优先顺序」。
+- 已决策分区：`Submissions with a Decision` 也自动纳入抓取（跨分页遍历全部历史，最多 8 页），报告层只显示决策日期在最近 7 天内的稿件；决策日期取 Status Date / Final Decision Date / Decision Date 列。
 - 表格兼容：`table#datatable` 与 `table#GridSubmissions`（表头在 tbody 首行 `<th>`）两种 EM 结构都能解析。
-- 状态翻译：Under Review→审稿中、In Production→生产中、Needs Author Action→等待作者操作、Major/Minor Revision→大修/小修、Awaiting Author Approval→等待作者确认 等 40+ 状态，另有前缀/关键词模糊匹配（Reject*→已拒稿、Accept*→已接受、*Revis*→修改中）。
+- 状态翻译：Under Review→审稿中、In Production→生产中、Needs Author Action→等待作者操作、Major/Minor Revision→大修/小修、Awaiting Author Approval→等待作者确认 等 40+ 状态，另有前缀/关键词模糊匹配（含 Reject 即→已拒稿、含 Accept 即→已接受、含 Revis 即→修改中，可覆盖 Completed - Reject / Completed - Accept 等组合状态）。
 - 非 EM 期刊（`system: 'other'`）在守护定时中仅标记「需 AI 检查」，交互式调用 `check_paper_status` 时由 AI 用浏览器工具完成。
 
 ## 构建（开发者）

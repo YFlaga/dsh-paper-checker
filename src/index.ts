@@ -82,6 +82,8 @@ interface SectionResult {
   name: string
   count: number
   submissions: Submission[]
+  /** 决策历史分区（Submissions with a Decision）：报告里只列最近 7 天决策的稿件。 */
+  kind?: 'decision'
 }
 interface JournalResult {
   journal: string
@@ -143,8 +145,8 @@ const zh = (s: string): string => {
   const t = (s || '').trim()
   if (!t) return ''
   if (STATUS_ZH[t]) return STATUS_ZH[t]
-  if (/^reject/i.test(t)) return '已拒稿'
-  if (/^accept/i.test(t)) return '已接受'
+  if (/reject/i.test(t)) return '已拒稿'
+  if (/accept/i.test(t)) return '已接受'
   if (/production/i.test(t)) return '生产中'
   if (/revis/i.test(t)) return '修改中'
   if (/^under review/i.test(t)) return '审稿中'
@@ -249,6 +251,65 @@ async function parseTable(frame: any): Promise<{ headers: string[]; rows: string
   return null
 }
 
+/**
+ * 遍历表格的所有分页（EM datatable 常见分页），最多 maxPages 页，合并返回全部行。
+ * 用于决策历史等可能跨页的分区；普通活跃分区（一般一页内）仍走 parseTable。
+ * 分页控件是 <a href="javascript:document.resort.currentpage.value=N;document.resort.submit();">Next</a>，
+ * 点击后 content iframe 整页导航（2-4s），故翻页后轮询等待第一行编号变化，避免导航中误判/断连。
+ */
+async function scrapeTableAllPages(frame: any, maxPages = 8): Promise<{ headers: string[]; rows: string[][] } | null> {
+  let merged: { headers: string[]; rows: string[][] } | null = null
+  let prevFirst = ''
+  for (let p = 0; p < maxPages; p++) {
+    // 解析当前页（parseTable 内部已轮询等待表格；导航中 evaluate 抛错返回 null，这里短重试）
+    let parsed = await parseTable(frame)
+    if (!parsed || parsed.rows.length === 0) {
+      let ok = false
+      for (let w = 0; w < 20 && !ok; w++) {
+        await frame.waitForTimeout(500)
+        parsed = await parseTable(frame)
+        if (parsed && parsed.rows.length > 0) ok = true
+      }
+      if (!ok) break
+    }
+    if (!merged) merged = { headers: parsed.headers, rows: [] }
+    // 用第二列（Manuscript Number）做翻页判断：第一列是 Action 链接列，每页都相同
+    const first = parsed.rows[0]?.[1] ?? parsed.rows[0]?.[0] ?? ''
+    // 翻页后第一行编号未变 → 页面没跳转（已是最后一页/点击未生效），停止，防死循环
+    if (p > 0 && first === prevFirst) break
+    merged.rows.push(...parsed.rows)
+    prevFirst = first
+    // 点击分页 Next（a / button / input[type=button]，文本以 Next 或右箭头开头）
+    const clicked = await frame.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('a, button, input[type="button"]'))
+      const n = els.find((e) => {
+        const t = ((e as any).innerText ?? (e as any).value ?? '').trim()
+        return /^(next|›|»|&gt;|>)/i.test(t)
+      })
+      if (!n) return false
+      ;(n as any).click()
+      return true
+    }).catch(() => false)
+    if (!clicked) break
+    // 等待翻页生效：第二列编号变化（表单提交整页导航，最多 ~8s）
+    let moved = false
+    for (let w = 0; w < 16; w++) {
+      await frame.waitForTimeout(500)
+      const cur = await frame.evaluate(() => {
+        const t = document.querySelector('table#datatable') || document.querySelector('table#GridSubmissions')
+          || Array.from(document.querySelectorAll('table')).find((tb) => tb.querySelector('th'))
+        const tr = t ? Array.from(t.querySelectorAll('tbody tr, tr')).find((r: any) => r.querySelector('td') && !r.querySelector('th')) : null
+        if (!tr) return ''
+        const tds = tr.querySelectorAll('td')
+        return ((tds[1] as any)?.innerText || (tds[0] as any)?.innerText || '').trim()
+      }).catch(() => '')
+      if (cur && cur !== prevFirst) { moved = true; break }
+    }
+    if (!moved) break
+  }
+  return merged
+}
+
 function normalizeRows(parsed: { headers: string[]; rows: string[][] } | null): Submission[] {
   if (!parsed) return []
   return parsed.rows.map((cells) => {
@@ -258,7 +319,7 @@ function normalizeRows(parsed: { headers: string[]; rows: string[][] } | null): 
       number: rec['manuscript number'] ?? '',
       title: rec['title'] ?? rec['article title'] ?? '',
       submitted: rec['initial date submitted'] ?? '',
-      statusDate: rec['status date'] ?? rec['final decision date'] ?? rec['transfer offer expiration date'] ?? '',
+      statusDate: rec['status date'] ?? rec['final decision date'] ?? rec['decision date'] ?? rec['transfer offer expiration date'] ?? '',
       revBegan: rec['date revision began'] ?? '',
       revDue: rec['date revision due'] ?? rec['transfer offer expiration date'] ?? '',
       status: rec['current status'] ?? rec['production status'] ?? rec['status'] ?? '',
@@ -354,15 +415,16 @@ async function scrapeEmJournal(j: JournalConfig): Promise<JournalResult> {
     if (!frame) return { journal: j.name, system: 'editorial-manager', error: '登录失败或未等到主菜单 [' + dbg.join(' | ') + ']' }
 
     const { counts, links } = await scrapeMenu(frame)
-    // 分区清单：配置的分区优先（保序、尊重用户显式选择），再自动补充主菜单上其他「活跃投稿分区」
-    // （count>0 且有链接；排除 New Submissions 发起入口 / with a Decision 决策历史 / with Production Completed 已完成）
+    // 分区清单：配置的分区优先（保序、尊重用户显式选择），再自动补充主菜单上其他「投稿分区」
+    // （count>0 且有链接；排除 New Submissions 发起入口 / with Production Completed 已完成历史）
+    // 决策历史分区（with a Decision）也纳入：kind='decision'，报告里只列最近 7 天决策的稿件
     const secNames: string[] = []
     for (const sec of j.sections) if (sec && !secNames.includes(sec)) secNames.push(sec)
     for (const key of Object.keys(links)) {
       if (secNames.includes(key)) continue
       const kt = key.toLowerCase()
-      if (!/(submission|revision)/.test(kt)) continue
-      if (/new submission|with a decision|with production completed/.test(kt)) continue
+      if (!/(submission|revision|decision)/.test(kt)) continue
+      if (/new submission|with production completed/.test(kt)) continue
       if ((counts[key] ?? 0) > 0 && links[key]) secNames.push(key)
     }
     const sections: SectionResult[] = []
@@ -370,16 +432,19 @@ async function scrapeEmJournal(j: JournalConfig): Promise<JournalResult> {
       const count = counts[secName] ?? 0
       const href = links[secName]
       const submissions: Submission[] = []
+      const kind: 'decision' | undefined = /with a decision/i.test(secName) ? 'decision' : undefined
       if (count > 0 && href) {
         await frame.goto(href, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
-        const rows = normalizeRows(await parseTable(frame))
+        // 决策历史可能跨页，遍历全部分页；普通活跃分区一页即可
+        const parsed = kind === 'decision' ? await scrapeTableAllPages(frame) : await parseTable(frame)
+        const rows = normalizeRows(parsed)
         // 转投/等待批准分区的 Current Status 列显示的是操作词（Reject/Decline），修正为「等待作者批准」
         if (/waiting for author|transfer/i.test(secName)) {
           for (const s of rows) if (/^reject|^decline/i.test(s.status)) s.status = 'Awaiting Author Approval'
         }
         submissions.push(...rows)
       }
-      sections.push({ name: secName, count, submissions })
+      sections.push({ name: secName, count, submissions, kind })
     }
     return { journal: j.name, system: 'editorial-manager', sections }
   } catch (e) {
@@ -400,10 +465,50 @@ function stageOf(secName: string, status: string): Stage {
   return 'submission'
 }
 
+/** 决策后多少天内仍列入报告（超出视为历史，不再刷屏）。 */
+const DECISION_WINDOW_DAYS = 7
+const MONTHS: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+}
+/** 解析 EM 常见日期格式（YYYY-MM-DD / MM/DD/YYYY / Mon DD YYYY / DD Mon YYYY / 带时间后缀），失败返回 null。 */
+function parseEmDate(s: string): Date | null {
+  const t = (s || '').trim()
+  if (!t) return null
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3])
+  m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
+  if (m) return new Date(+m[3], +m[1] - 1, +m[2])
+  m = t.match(/^([A-Za-z]{3,9})[.\s]+(\d{1,2}),?\s+(\d{4})/)
+  if (m) {
+    const mon = MONTHS[m[1].toLowerCase().slice(0, 3)]
+    if (mon !== undefined) return new Date(+m[3], mon, +m[2])
+  }
+  m = t.match(/^(\d{1,2})\s+([A-Za-z]{3,9})[.\s]+(\d{4})/)
+  if (m) {
+    const mon = MONTHS[m[2].toLowerCase().slice(0, 3)]
+    if (mon !== undefined) return new Date(+m[3], mon, +m[1])
+  }
+  const d = new Date(t)
+  return isNaN(d.getTime()) ? null : d
+}
+
+/** 决策历史分区：只保留决策日期在最近 DECISION_WINDOW_DAYS 天内的稿件（日期无法解析则视为历史，不列）。 */
+function recentDecisions(subs: Submission[], today: Date): Submission[] {
+  return subs.filter((s) => {
+    const d = parseEmDate(s.statusDate)
+    if (!d) return false
+    const diff = Math.round((today.getTime() - d.getTime()) / 86400000)
+    return diff >= 0 && diff <= DECISION_WINDOW_DAYS
+  })
+}
+
 function formatReport(results: JournalResult[], dateStr: string): string {
   const lines: string[] = [`📊 每日投稿状态报告 (${dateStr})`, '']
   let total = 0
+  let decisionTotal = 0
   const stageCounts: Record<Stage, number> = { submission: 0, revision: 0, production: 0 }
+  const today = new Date()
   for (const r of results) {
     lines.push(`**${r.journal}:**`)
     if (r.error) {
@@ -415,18 +520,30 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       continue
     }
     const sections = r.sections ?? []
-    if (!sections.some((s) => (s.submissions?.length ?? 0) > 0)) {
-      lines.push('- 无活跃投稿（所有分区计数均为 0）。')
-      lines.push('')
-      continue
-    }
+    const secLines: string[] = []
+    let hasContent = false
     for (const sec of sections) {
       const subs = sec.submissions ?? []
-      if (subs.length === 0) {
-        if ((sec.count ?? 0) > 0) lines.push(`- ⚠️ ${sec.name}（计数 ${sec.count}，未抓到稿件列表）`)
+      // 决策历史分区：只列最近 7 天内的决策，独立分组，不计入活跃投稿
+      if (sec.kind === 'decision') {
+        const recent = recentDecisions(subs, today)
+        if (recent.length === 0) continue
+        hasContent = true
+        decisionTotal += recent.length
+        secLines.push(`- 📂 近期决策（${DECISION_WINDOW_DAYS} 天内）`)
+        for (const s of recent) {
+          const parts: string[] = []
+          if (s.statusDate) parts.push(`决策 ${s.statusDate}`)
+          secLines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
+        }
         continue
       }
-      lines.push(`- 📂 ${sec.name}（${sec.count}）`)
+      if (subs.length === 0) {
+        if ((sec.count ?? 0) > 0) secLines.push(`- ⚠️ ${sec.name}（计数 ${sec.count}，未抓到稿件列表）`)
+        continue
+      }
+      hasContent = true
+      secLines.push(`- 📂 ${sec.name}（${sec.count}）`)
       for (const s of subs) {
         const stage = stageOf(sec.name, s.status)
         stageCounts[stage]++
@@ -435,15 +552,23 @@ function formatReport(results: JournalResult[], dateStr: string): string {
         if (s.submitted) parts.push(`投稿 ${s.submitted}`)
         if (s.statusDate) parts.push(`更新 ${s.statusDate}`)
         if (s.revDue) parts.push(`截止 ${s.revDue}`)
-        lines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
+        secLines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
       }
     }
+    if (!hasContent) {
+      lines.push('- 无活跃投稿（所有分区计数均为 0）。')
+      lines.push('')
+      continue
+    }
+    lines.push(...secLines)
     lines.push('')
   }
   const stageSummary = (['submission', 'revision', 'production'] as Stage[])
     .filter((k) => stageCounts[k] > 0)
     .map((k) => `${STAGE_ZH[k]} ${stageCounts[k]} 篇`)
-  lines.push(`**摘要:** 共 ${total} 篇活跃投稿${stageSummary.length ? '（' + stageSummary.join(' · ') + '）' : ''}。`)
+  let summary = `**摘要:** 共 ${total} 篇活跃投稿${stageSummary.length ? '（' + stageSummary.join(' · ') + '）' : ''}`
+  if (decisionTotal > 0) summary += ` · 近期决策 ${decisionTotal} 篇`
+  lines.push(summary + '。')
   return lines.join('\n')
 }
 
