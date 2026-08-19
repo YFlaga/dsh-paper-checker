@@ -712,13 +712,11 @@ async function callLlmText(llmService: any, settingsService: any, prompt: string
   return ''
 }
 
-/** 分析 EM 主菜单文本，识别期刊名 + 需跟踪分区。 */
+/** 分析 EM 主菜单文本，识别期刊名 + 系统类型（分区由页面确定性探测提供，不依赖模型，避免漏/错）。 */
 async function analyzeJournalMenu(llmService: any, settingsService: any, baseUrl: string, bodyText: string, providerOverride?: string, modelOverride?: string): Promise<{ name?: string; sections?: string[]; system?: string; error?: string }> {
   const prompt = [
     '你是学术期刊投稿系统配置助手。下面是某个 Editorial Manager 投稿网站登录后的作者主菜单文本。',
-    '请从中识别：',
-    '1) 期刊名（英文全名，去掉页面里无关的品牌文案）；',
-    '2) 需要跟踪审稿/修改/生产状态的分区名（例如 Submissions Being Processed、Submissions Needing Revision、Submissions in Production、Revisions Being Processed、Revisions Under Review 等；忽略 Incomplete Submissions 等无关项）。',
+    '请从中识别期刊名（英文全名，去掉页面里无关的品牌文案）。',
     '系统类型固定为 editorial-manager。',
     '',
     '站点地址：' + baseUrl,
@@ -727,7 +725,7 @@ async function analyzeJournalMenu(llmService: any, settingsService: any, baseUrl
     bodyText.slice(0, 6000),
     '',
     '只输出一个 JSON 对象（不要 markdown 代码块、不要多余说明），格式：',
-    '{"name":"期刊名","sections":["分区名1","分区名2"],"system":"editorial-manager"}',
+    '{"name":"期刊名","system":"editorial-manager"}',
   ].join('\n')
   const text = await callLlmText(llmService, settingsService, prompt, providerOverride, modelOverride)
   const m = text.match(/\{[\s\S]*\}/)
@@ -816,16 +814,20 @@ export function apply(ctx: AppContext, config: Config): void {
           if (!baseUrl || !username || !password) return send(400, { ok: false, error: '网址/账号/密码不能为空' })
           const menu = await loginAndGetMenu(baseUrl, username, password)
           if (menu.error) return send(200, { ok: false, error: menu.error })
-          // 模型识别优先；失败则确定性回退（页面标题 + 带计数分区）
+          // 分区以页面确定性探测为准：主菜单里全部带计数分区（含 count=0，按菜单顺序），
+          // 这就是「网站有哪些分区」的结构——保存后每次检查时配置优先抓取，
+          // count=0 的分区自动跳过，将来一有稿件（count>0）即被抓取，无需再手动维护。
+          // 排除 with Production Completed（已完成历史归档）与 Task Assignments（EM 任务功能区，非投稿分区）。
+          const sections = Object.keys(menu.counts).filter((k) => !/with production completed|task assignment/i.test(k))
+          // 期刊名以页面标题（确定性）优先，模型识别仅在标题缺失/过泛时兜底（模型可能把页面无关文案当刊名）
           let name = menu.title?.trim() || ''
-          let sections = Object.keys(menu.counts).filter((k) => (menu.counts[k] ?? 0) > 0)
+          const titleGeneric = !name || name.length < 3 || /editorial manager|author main menu|main menu|welcome/i.test(name)
           let system = 'editorial-manager'
           const cfgNow = getConfig()
           const parsed = await analyzeJournalMenu(ctx.llm, settingsService, baseUrl, menu.bodyText || menu.title, cfgNow.discoverProvider, cfgNow.discoverModel)
           if (!parsed.error) {
-            if (parsed.name?.trim()) name = parsed.name.trim()
-            if (parsed.sections?.length) sections = parsed.sections
             if (parsed.system) system = parsed.system
+            if (titleGeneric && parsed.name?.trim()) name = parsed.name.trim()
           }
           if (!name) name = new URL(baseUrl).hostname.replace(/^www\./, '').replace(/\.editorialmanager\.com$/, '')
           return send(200, { ok: true, config: { name, baseUrl, username, password, sections, system }, llmError: parsed.error })

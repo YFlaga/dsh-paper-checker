@@ -65,7 +65,8 @@ journals:
     sections:
       - 'Submissions Being Processed'
       - 'Submissions Needing Revision'
-    # sections 可选：只写要优先跟踪的分区；主菜单上其他 count>0 的投稿分区会自动补抓
+    # sections 可选：面板「自动识别新期刊」会探测主菜单全部投稿分区并自动写入（含当前 0 篇的），
+    # 之后每次检查按此抓取、出现新稿件即被抓到，无需手动维护；手动加分区也可以，优先抓取
     system: 'editorial-manager'   # 默认；'other' 则回退给 AI
   - name: '某非 EM 期刊'
     baseUrl: 'https://example.com/submit'
@@ -91,7 +92,7 @@ discoverModel: ''                 # 可选：自动识别新期刊用的模型�
 | `journals[].name` | string | 期刊显示名 |
 | `journals[].baseUrl` | string | EM 站点根地址（如 `https://www.editorialmanager.com/xxx`） |
 | `journals[].username/password` | string | 登录凭据 |
-| `journals[].sections` | string[] | 优先跟踪的分区名（可选）；主菜单其他活跃分区自动发现补抓 |
+| `journals[].sections` | string[] | 要检查的分区名；面板自动识别新期刊时探测主菜单全部分区自动写入，之后检查按此抓取（可选，留空则靠自动发现补抓） |
 | `journals[].system` | 'editorial-manager'\|'other' | 抓取方式；EM 确定性，other 回退 AI |
 | `time` | 'HH:mm' | 每天触发时间 |
 | `timezone` | IANA 时区 | 如 Asia/Shanghai |
@@ -116,7 +117,7 @@ discoverModel: ''                 # 可选：自动识别新期刊用的模型�
 ## 说明
 
 - Editorial Manager 登录兼容两种形态：直接表单 / 折叠在「Alternatively, use your username and password」里。
-- 分区自动发现：抓取主菜单上所有 count>0 的投稿分区（Submissions Being Processed / Needing Revision / in Production / Revisions Being Processed / 转投待批准等），排除 New Submissions 入口与 with Production Completed 已完成历史；`sections` 配置只决定「优先顺序」。
+- 新增期刊自动探测：面板「自动识别新期刊」登录后确定性探测主菜单上**全部**投稿分区（含当前 0 篇的分区，按菜单顺序，排除 Task Assignments 任务区与 with Production Completed 已完成历史）写入 `sections`，模型只识别期刊名/系统类型（期刊名可能识别不准，面板里可直接修改后加入）；保存后每次检查按探测结果抓取，count=0 分区自动跳过、一有稿件即被抓到。老配置未写 `sections` 时，检查时自动发现 count>0 的投稿分区补抓（排除 New Submissions 入口与 with Production Completed 已完成历史）。
 - 已决策分区：`Submissions with a Decision` 也自动纳入抓取（跨分页遍历全部历史，最多 8 页），报告层只显示决策日期在最近 7 天内的稿件；决策日期取 Status Date / Final Decision Date / Decision Date 列。
 - 表格兼容：`table#datatable` 与 `table#GridSubmissions`（表头在 tbody 首行 `<th>`）两种 EM 结构都能解析。
 - 状态翻译：Under Review→审稿中、In Production→生产中、Needs Author Action→等待作者操作、Major/Minor Revision→大修/小修、Awaiting Author Approval→等待作者确认 等 40+ 状态，另有前缀/关键词模糊匹配（含 Reject 即→已拒稿、含 Accept 即→已接受、含 Revis 即→修改中，可覆盖 Completed - Reject / Completed - Accept 等组合状态）。

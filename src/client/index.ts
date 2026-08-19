@@ -36,6 +36,7 @@ function PaperCheckerPanel(props: any): any {
   const [dPass, setDPass] = React.useState<string>('')
   const [discovering, setDiscovering] = React.useState<boolean>(false)
   const [discovered, setDiscovered] = React.useState<any>(null)
+  const [discoveredName, setDiscoveredName] = React.useState<string>('')
   const [discoverMsg, setDiscoverMsg] = React.useState<string>('')
   const [modelGroups, setModelGroups] = React.useState<any[]>([])
 
@@ -121,6 +122,7 @@ function PaperCheckerPanel(props: any): any {
       })
       if (res.ok) {
         setDiscovered(res.config)
+        setDiscoveredName(res.config?.name || '')
         setDiscoverMsg(res.llmError ? '（模型识别失败，已用页面信息回退）确认无误后点「加入列表」' : '识别成功，确认无误后点「加入列表」')
       } else {
         setDiscoverMsg('识别失败: ' + (res.error ?? ''))
@@ -137,9 +139,12 @@ function PaperCheckerPanel(props: any): any {
     let journals: any[]
     try { journals = JSON.parse(journalsText) } catch { journals = [] }
     if (!Array.isArray(journals)) journals = []
-    journals.push(discovered)
+    const name = discoveredName.trim() || discovered.name || ''
+    if (!name) { setDiscoverMsg('期刊名不能为空'); return }
+    journals.push({ ...discovered, name })
     setJournalsText(JSON.stringify(journals, null, 2))
     setDiscovered(null)
+    setDiscoveredName('')
     setDiscoverMsg('已加入列表，记得点「保存」')
   }
 
@@ -235,13 +240,18 @@ function PaperCheckerPanel(props: any): any {
         discoverMsg ? React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)' } }, discoverMsg) : null,
       ),
       discovered ? React.createElement('div', { style: { marginTop: 8, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
-        React.createElement('div', null, '期刊名：' + (discovered.name || '')),
-        React.createElement('div', null, '分区：' + (Array.isArray(discovered.sections) ? discovered.sections.join('、') : '')),
+        React.createElement('label', { style: { ...s.label, marginBottom: 2 } }, '期刊名（可修改，自动识别可能不准）'),
+        React.createElement('input', {
+          style: { ...s.input, marginBottom: 6 },
+          value: discoveredName,
+          onChange: (e: any) => setDiscoveredName(e.target.value),
+        }),
+        React.createElement('div', null, '分区（' + (Array.isArray(discovered.sections) ? discovered.sections.length : 0) + ' 个）：' + (Array.isArray(discovered.sections) ? discovered.sections.slice(0, 8).join('、') + (discovered.sections.length > 8 ? ' 等' : '') : '')),
         React.createElement('div', { style: { marginTop: 6 } },
           React.createElement('button', { style: s.btn, type: 'button', onClick: addDiscovered }, '加入列表'),
         ),
       ) : null,
-      React.createElement('div', { style: s.hint }, '自动打开期刊网站登录，用模型识别期刊名与需要跟踪的审稿分区，生成后加入下方期刊列表。'),
+      React.createElement('div', { style: s.hint }, '自动打开期刊网站登录，探测主菜单上的全部投稿分区（含当前 0 篇的分区）并识别期刊名，生成后加入下方期刊列表；保存后每次检查会按探测结果自动抓取各分区（出现新稿件即被抓到），无需手动维护分区。'),
     ),
     React.createElement('div', { style: s.row },
       React.createElement('label', { style: s.label }, '期刊列表（JSON 数组）'),
